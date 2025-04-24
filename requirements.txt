@@ -11,3 +11,4 @@ wikipedia
 biopython 
 requests 
 beautifulsoup4
+wikipedia-api
