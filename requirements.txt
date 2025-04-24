@@ -1,0 +1,13 @@
+ipykernel
+pandas
+numpy
+matplotlib
+seaborn
+transformers
+datasets
+scikit-learn
+faiss-cpu
+wikipedia 
+biopython 
+requests 
+beautifulsoup4
