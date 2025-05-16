@@ -8,6 +8,9 @@ Original file is located at
 """
 
 import pandas as pd
+import sys
+from src.logger import logging
+from src.Exception import CustomException
 import os
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
@@ -54,7 +57,7 @@ class WebSearchEngine:
             try:
                 return self._search_with_serpapi(query, num_results)
             except Exception as e:
-                print(f"SerpAPI search failed: {e}")
+                logging.error(f"SerpAPI search failed: {e}")
 
         # Fall back to a basic approach
         return self._search_with_ddg(query, num_results)
@@ -116,7 +119,8 @@ class WebSearchEngine:
 
             return results
         except Exception as e:
-            print(f"DDG search failed: {e}")
+            logging.error(f"DDG search failed: {e}")
+            raise CustomException(e,sys)
             # Return empty results if search fails
             return []
 
@@ -155,7 +159,7 @@ class WebSearchEngine:
 
             return text
         except Exception as e:
-            print(f"Failed to fetch {url}: {e}")
+            logging.error(f"Failed to fetch {url}: {e}")
             return ""
 
 
@@ -170,189 +174,214 @@ class HealthcareRAG:
             device: Device to run the model on ('cuda' or 'cpu')
             search_api_key: API key for web search (optional)
         """
-        self.device = "cuda" if torch.cuda.is_available() and device == "cuda" else "cpu"
-        print(f"Using device: {self.device}")
+        try:
+            self.device = "cuda" if torch.cuda.is_available() and device == "cuda" else "cpu"
+            logging.info(f"Using device: {self.device}")
 
-        # Load tokenizer and model
-        print("Loading Phi-3.5 model and tokenizer...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            cache_dir=cache_dir
-        ).to(self.device)
+            # Load tokenizer and model
+            logging.info("Loading Phi-3.5 model and tokenizer...")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                cache_dir=cache_dir
+            ).to(self.device)
 
-        # Load embedding model
-        print("Loading embedding model...")
-        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2').to(self.device)
+            # Load embedding model
+            logging.info("Loading embedding model...")
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2').to(self.device)
 
-        # Initialize empty index and document store
-        self.index = None
-        self.documents = []
+            # Initialize empty index and document store
+            self.index = None
+            self.documents = []
 
-        # Initialize web search engine
-        self.search_engine = WebSearchEngine(api_key=search_api_key)
+            # Initialize web search engine
+            self.search_engine = WebSearchEngine(api_key=search_api_key)
 
-        # Configure confidence threshold for local knowledge base
-        self.confidence_threshold = 0.6  # Adjust based on your dataset
+            # Configure confidence threshold for local knowledge base
+            self.confidence_threshold = 0.6  # Adjust based on your dataset
 
+        except Exception as e:
+            logging.error("Failed to initialize HealthcareRAG class")
+            raise CustomException(e, sys)
+    
     def load_healthcare_magic_dataset(self, limit=10000):
-        """
-        Load and prepare Healthcare Magic dataset
+        try:
+            """
+            Load and prepare Healthcare Magic dataset
 
-        Args:
-            limit: Number of rows to use (default: 10000)
-        """
-        print(f"Loading Healthcare Magic dataset (limit: {limit})...")
-        dataset = load_dataset("lavita/ChatDoctor-HealthCareMagic-100k")
+            Args:
+                limit: Number of rows to use (default: 10000)
+            """
+            logging.info(f"Loading Healthcare Magic dataset (limit: {limit})...")
+            dataset = load_dataset("lavita/ChatDoctor-HealthCareMagic-100k")
 
-        # Get the 'train' split and convert to DataFrame
-        df = dataset['train'].to_pandas()
+            # Get the 'train' split and convert to DataFrame
+            df = dataset['train'].to_pandas()
 
-        # Select just what we need and limit rows
-        df = df.head(limit)
+            # Select just what we need and limit rows
+            df = df.head(limit)
 
-        # Process the dataset
-        self.documents = []
-        for idx, row in df.iterrows():
-            # Combine question and answer into a document
-            document = {
-                'id': idx,
-                'question': row['input'],
-                'answer': row['output'],
-                'content': f"Question: {row['input']}\nAnswer: {row['output']}"
-            }
-            self.documents.append(document)
+            # Process the dataset
+            self.documents = []
+            for idx, row in df.iterrows():
+                # Combine question and answer into a document
+                document = {
+                    'id': idx,
+                    'question': row['input'],
+                    'answer': row['output'],
+                    'content': f"Question: {row['input']}\nAnswer: {row['output']}"
+                }
+                self.documents.append(document)
 
-        print(f"Processed {len(self.documents)} documents from Healthcare Magic dataset")
+            logging.info(f"Processed {len(self.documents)} documents from Healthcare Magic dataset")
+        except Exception as e:
+            logging.error("Failed to load Healthcare Magic dataset")
+            raise CustomException(e, sys)
 
     def build_index(self):
-        """
-        Build FAISS index from documents
-        """
-        print("Building search index...")
+        try:
+            """
+            Build FAISS index from documents
+            """
+            logging.info("Building search index...")
 
-        # Create text chunks to embed
-        texts = [doc['content'] for doc in self.documents]
+            # Create text chunks to embed
+            texts = [doc['content'] for doc in self.documents]
 
-        # Generate embeddings
-        embeddings = self.embedding_model.encode(texts, show_progress_bar=True)
+            # Generate embeddings
+            embeddings = self.embedding_model.encode(texts, show_progress_bar=True)
 
-        # Normalize embeddings
-        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+            # Normalize embeddings
+            embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
 
-        # Build FAISS index
-        vector_dimension = embeddings.shape[1]
-        self.index = faiss.IndexFlatIP(vector_dimension)
-        self.index.add(embeddings.astype('float32'))
+            # Build FAISS index
+            vector_dimension = embeddings.shape[1]
+            self.index = faiss.IndexFlatIP(vector_dimension)
+            self.index.add(embeddings.astype('float32'))
 
-        print(f"Index built with {self.index.ntotal} vectors of dimension {vector_dimension}")
-
+            logging.info(f"Index built with {self.index.ntotal} vectors of dimension {vector_dimension}")
+        except Exception as e:
+            logging.error("Failed to build FAISS index")
+            raise CustomException(e, sys)
+        
     def add_document_to_index(self, document: Dict[str, Any]):
-        """
-        Add a new document to the index and document store
+        try:
+            """
+            Add a new document to the index and document store
 
-        Args:
-            document: Document to add
-        """
-        if not self.index:
-            raise ValueError("Index not initialized. Call build_index first.")
+            Args:
+                document: Document to add
+            """
+            if not self.index:
+                raise ValueError("Index not initialized. Call build_index first.")
 
-        # Add to document store
-        doc_id = len(self.documents)
-        document['id'] = doc_id
-        self.documents.append(document)
+            # Add to document store
+            doc_id = len(self.documents)
+            document['id'] = doc_id
+            self.documents.append(document)
 
-        # Add to index
-        embedding = self.embedding_model.encode([document['content']], show_progress_bar=False)
-        embedding = embedding / np.linalg.norm(embedding, axis=1, keepdims=True)
-        self.index.add(embedding.astype('float32'))
+            # Add to index
+            embedding = self.embedding_model.encode([document['content']], show_progress_bar=False)
+            embedding = embedding / np.linalg.norm(embedding, axis=1, keepdims=True)
+            self.index.add(embedding.astype('float32'))
 
-        return doc_id
+            return doc_id
+        except Exception as e:
+            logging.error("Failed to add document to index")
+            raise CustomException(e, sys)
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant documents for a query
+        try:
+            """
+            Retrieve relevant documents for a query
 
-        Args:
-            query: User query
-            top_k: Number of documents to retrieve
+            Args:
+                query: User query
+                top_k: Number of documents to retrieve
 
-        Returns:
-            List of relevant documents
-        """
-        # Generate embedding for the query
-        query_embedding = self.embedding_model.encode([query], show_progress_bar=False)
-        query_embedding = query_embedding / np.linalg.norm(query_embedding)
+            Returns:
+                List of relevant documents
+            """
+            # Generate embedding for the query
+            query_embedding = self.embedding_model.encode([query], show_progress_bar=False)
+            query_embedding = query_embedding / np.linalg.norm(query_embedding)
 
-        # Search the index
-        scores, indices = self.index.search(query_embedding.astype('float32'), top_k)
+            # Search the index
+            scores, indices = self.index.search(query_embedding.astype('float32'), top_k)
 
-        # Retrieve matching documents
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx != -1 and idx < len(self.documents):  # Valid index
-                doc = self.documents[idx]
-                results.append({
-                    'id': doc['id'],
-                    'content': doc['content'],
-                    'question': doc['question'],
-                    'answer': doc['answer'],
-                    'score': float(scores[0][i]),
-                    'source': 'local_database'
-                })
+            # Retrieve matching documents
+            results = []
+            for i, idx in enumerate(indices[0]):
+                if idx != -1 and idx < len(self.documents):  # Valid index
+                    doc = self.documents[idx]
+                    results.append({
+                        'id': doc['id'],
+                        'content': doc['content'],
+                        'question': doc['question'],
+                        'answer': doc['answer'],
+                        'score': float(scores[0][i]),
+                        'source': 'local_database'
+                    })
 
-        return results
+            return results
+        except Exception as e:
+            logging.error("Failed to retrieve documents")
+            raise CustomException(e, sys)
+        
 
     def search_web(self, query: str, num_results: int = 3) -> List[Dict[str, Any]]:
-        """
-        Search the web for relevant information
+        try:
+            """
+            Search the web for relevant information
 
-        Args:
-            query: User query
-            num_results: Number of web results to retrieve
+            Args:
+                query: User query
+                num_results: Number of web results to retrieve
 
-        Returns:
-            List of processed web documents
-        """
-        # Search the web
-        search_results = self.search_engine.search(query, num_results)
+            Returns:
+                List of processed web documents
+            """
+            # Search the web
+            search_results = self.search_engine.search(query, num_results)
 
-        # Process results
-        web_docs = []
-        for i, result in enumerate(search_results):
-            # Fetch the full content from the URL
-            full_content = self.search_engine.fetch_content(result["url"])
+            # Process results
+            web_docs = []
+            for i, result in enumerate(search_results):
+                # Fetch the full content from the URL
+                full_content = self.search_engine.fetch_content(result["url"])
 
-            # Skip if content retrieval failed
-            if not full_content:
-                continue
+                # Skip if content retrieval failed
+                if not full_content:
+                    continue
 
-            # Create a document
-            doc = {
-                'id': f"web_{i}",
-                'title': result["title"],
-                'snippet': result["snippet"],
-                'url': result["url"],
-                'content': full_content,
-                'score': 1.0 - (i * 0.1),  # Simple relevance score based on search ranking
-                'source': 'web'
-            }
-            web_docs.append(doc)
+                # Create a document
+                doc = {
+                    'id': f"web_{i}",
+                    'title': result["title"],
+                    'snippet': result["snippet"],
+                    'url': result["url"],
+                    'content': full_content,
+                    'score': 1.0 - (i * 0.1),  # Simple relevance score based on search ranking
+                    'source': 'web'
+                }
+                web_docs.append(doc)
 
-            # Optionally add to knowledge base for future use
-            # Simplified content for embedding (title + snippet)
-            simplified_content = f"Question: {query}\nAnswer: {result['title']}. {result['snippet']}"
-            local_doc = {
-                'question': query,
-                'answer': f"{result['title']}. {result['snippet']}",
-                'content': simplified_content,
-                'url': result['url']
-            }
-            self.add_document_to_index(local_doc)
+                # Optionally add to knowledge base for future use
+                # Simplified content for embedding (title + snippet)
+                simplified_content = f"Question: {query}\nAnswer: {result['title']}. {result['snippet']}"
+                local_doc = {
+                    'question': query,
+                    'answer': f"{result['title']}. {result['snippet']}",
+                    'content': simplified_content,
+                    'url': result['url']
+                }
+                self.add_document_to_index(local_doc)
 
-        return web_docs
-
+            return web_docs
+        except Exception as e:
+            logging.error("Failed to search the web")
+            raise CustomException(e, sys)
     def generate_response(self, query: str, retrieved_docs: List[Dict[str, Any]]) -> Tuple[str, bool]:
         """
         Generate response using Phi-3.5 with retrieved context
